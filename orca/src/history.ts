@@ -1,71 +1,159 @@
-// What the worker keeps in storage, one record per session, and the summary the panel and
-// the status bar show. Pure: the worker does the storage and the file reading.
-import type { Amount, SessionTotals } from './carbon/session.ts'
-import type { Tokens } from './carbon/transcript.ts'
+// What the worker keeps in storage, one record per session, and how a record is priced.
+// A record holds raw tokens per model and day, so CO2 and cost always use the factors and
+// prices loaded now: a new factors.json applies to the whole history at once. Pure: the
+// worker does the storage and the file reading.
+import type { Factors } from './carbon/co2.ts'
+import type { Prices } from './carbon/cost.ts'
+import { sessionTotals, type Amount } from './carbon/session.ts'
+import { emptyTokens, type Tokens, type UsageRow } from './carbon/transcript.ts'
 
-export type SessionRecord = Amount & {
+/** The storage layout; `migrate` brings older ones up to it. */
+export const SCHEMA_VERSION = 2
+export const SCHEMA_KEY = 'schema'
+export const HISTORY_KEY = 'sessions'
+/** Picked session per workspace id. */
+export const PICKS_KEY = 'picks'
+/** The last focused workspace, so a restarted worker shows it before Orca's next event. */
+export const FOCUS_KEY = 'focus'
+/** When the last full import ended. */
+export const BACKFILL_KEY = 'backfill'
+
+export type ModelAmount = Amount & { model: string; excluded: boolean }
+
+/** What a schema 1 record held, kept until its transcript is read again. */
+export type LegacyAmounts = Amount & {
+  tokens: Tokens
+  models: ModelAmount[]
+  days: Record<string, Amount>
+}
+
+export type SessionRecord = {
   sessionId: string
   title: string | null
   /** When the worker last computed it, ms since epoch. */
   updatedAt: number
-  /** The transcript files it was computed from (files.ts stampOf): unchanged, it is not redone. */
+  /** The transcript files and parser it was computed from (files.ts stampOf); '' to redo. */
   stamp: string
-  /** Orca workspace ids the session ran in (workspaceId and workspaceListId as Orca gives them). */
-  workspaceIds?: string[]
+  /** When a transcript file last changed, ms since epoch: a record from older files never replaces it. */
+  lastActiveAt: number
   /** First message time, ms since epoch; null when the transcript has none. */
-  startedAt?: number | null
-  /** When a transcript file last changed, ms since epoch. */
-  lastActiveAt?: number
+  startedAt: number | null
   /** The folder Claude Code ran in, from the transcript. */
-  cwd?: string | null
-  /** The Orca workspace's name, when the session was seen in one. */
-  workspaceName?: string | null
-  tokens: Tokens
-  models: { model: string; co2Grams: number; costUsd: number; excluded: boolean }[]
-  days: Record<string, Amount>
+  cwd: string | null
+  /** Orca workspace ids the session ran in (workspaceId and workspaceListId as Orca gives them). */
+  workspaceIds: string[]
+  /** The Orca workspace's name when it was last seen in one. */
+  workspaceName: string | null
+  /** Tokens per model and day, main transcript and subagents merged. */
+  usage: UsageRow[]
+  /** Schema 1 amounts, for a record whose transcript is no longer on disk to read. */
+  legacy?: LegacyAmounts
 }
 
 /** Every stored session, by session id. */
 export type History = Record<string, SessionRecord>
 
-export type DayTotal = Amount & { day: string; sessions: number }
+/** Picked session per workspace id, kept in storage under PICKS_KEY. */
+export type Picks = Record<string, string>
 
-export type Summary = {
-  today: string
-  latest: SessionRecord | null
-  todayTotal: DayTotal
-  last30: Amount & { sessions: number }
-  /** The last 30 days, oldest first, days with nothing included. */
-  days: DayTotal[]
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export const HISTORY_KEY = 'sessions'
-export const SUMMARY_DAYS = 30
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+const num = (v: unknown, fallback: number): number =>
+  typeof v === 'number' && Number.isFinite(v) ? v : fallback
 
-export function toRecord(
-  sessionId: string,
-  title: string | null,
-  totals: SessionTotals,
-  now: number,
-  stamp: string,
-  extra: {
-    workspaceIds?: string[]
-    startedAt?: number | null
-    lastActiveAt?: number
-    cwd?: string | null
-    workspaceName?: string | null
-  } = {}
-): SessionRecord {
+/**
+ * The stored history in the current schema. Schema 1 (no version stored) kept priced amounts
+ * only: its records keep their names and workspaces, their amounts as `legacy`, and an empty
+ * stamp, so the next import reads them all again. Anything unreadable is dropped.
+ */
+export function migrate(raw: unknown, version: unknown): History {
+  if (!isObject(raw)) return {}
+  const history: History = {}
+  for (const [id, value] of Object.entries(raw)) {
+    if (!isObject(value)) continue
+    const ids = Array.isArray(value.workspaceIds)
+      ? value.workspaceIds.filter((w): w is string => typeof w === 'string')
+      : []
+    const base = {
+      sessionId: id,
+      title: str(value.title),
+      updatedAt: num(value.updatedAt, 0),
+      lastActiveAt: num(value.lastActiveAt, num(value.updatedAt, 0)),
+      startedAt: typeof value.startedAt === 'number' ? value.startedAt : null,
+      cwd: str(value.cwd),
+      workspaceIds: ids,
+      workspaceName: str(value.workspaceName)
+    }
+    if (version === SCHEMA_VERSION && Array.isArray(value.usage)) {
+      history[id] = {
+        ...base,
+        stamp: str(value.stamp) ?? '',
+        usage: value.usage as UsageRow[],
+        ...(isObject(value.legacy) ? { legacy: value.legacy as unknown as LegacyAmounts } : {})
+      }
+    } else if (typeof value.co2Grams === 'number') {
+      history[id] = {
+        ...base,
+        stamp: '',
+        usage: [],
+        legacy: {
+          co2Grams: value.co2Grams,
+          costUsd: num(value.costUsd, 0),
+          tokens: isObject(value.tokens) ? (value.tokens as unknown as Tokens) : emptyTokens(),
+          models: Array.isArray(value.models) ? (value.models as ModelAmount[]) : [],
+          days: isObject(value.days) ? (value.days as Record<string, Amount>) : {}
+        }
+      }
+    }
+  }
+  return history
+}
+
+export function mergeIds(a: string[] = [], b: string[] = []): string[] {
+  return [...new Set([...a, ...b])]
+}
+
+/**
+ * The history with this session's record in place of the stored one. The worker recomputes
+ * a session from its whole transcript, so the same session done twice is stored once. A
+ * record read from older files than the stored one (an import that read a session while a
+ * turn ended) does not replace it; either way the names and workspaces it carries are kept.
+ */
+export function upsert(history: History, record: SessionRecord): History {
+  const previous = history[record.sessionId]
+  const meta = {
+    title: record.title ?? previous?.title ?? null,
+    workspaceName: record.workspaceName ?? previous?.workspaceName ?? null,
+    workspaceIds: mergeIds(previous?.workspaceIds, record.workspaceIds)
+  }
+  const stale = previous !== undefined && previous.stamp !== '' && previous.lastActiveAt > record.lastActiveAt
   return {
-    sessionId,
-    title,
-    updatedAt: now,
-    stamp,
-    workspaceIds: extra.workspaceIds ?? [],
-    startedAt: extra.startedAt ?? null,
-    lastActiveAt: extra.lastActiveAt ?? now,
-    cwd: extra.cwd ?? null,
-    workspaceName: extra.workspaceName ?? null,
+    ...history,
+    [record.sessionId]: { ...(stale ? previous : record), ...meta }
+  }
+}
+
+/** A record with its CO2 and cost at the factors and prices given. */
+export type Priced = Amount & {
+  record: SessionRecord
+  tokens: Tokens
+  /** Largest first; excluded models (not Claude, or exclude_models) count 0. */
+  models: ModelAmount[]
+  /** Per local day the session's messages fell on; days with nothing left out. */
+  days: Record<string, Amount>
+}
+
+export function price(record: SessionRecord, factors: Factors, prices: Prices | null): Priced {
+  if (record.usage.length === 0 && record.legacy) {
+    const { co2Grams, costUsd, tokens, models, days } = record.legacy
+    return { record, co2Grams, costUsd, tokens, models, days: nonZeroDays(days) }
+  }
+  const totals = sessionTotals(record.usage, factors, prices)
+  return {
+    record,
     co2Grams: totals.co2Grams,
     costUsd: totals.costUsd,
     tokens: totals.tokens,
@@ -75,91 +163,23 @@ export function toRecord(
       costUsd,
       excluded
     })),
-    days: totals.days
+    days: nonZeroDays(totals.days)
   }
 }
 
-/**
- * The history with this session's record put in place of any earlier one: the worker
- * recomputes a session from its whole transcript, so the same session done twice is
- * stored once. A record keeps the title it had when the new one has none, and every
- * workspace it was seen in.
- */
-export function upsert(history: History, record: SessionRecord): History {
-  const previous = history[record.sessionId]
-  return {
-    ...history,
-    [record.sessionId]: {
-      ...record,
-      title: record.title ?? previous?.title ?? null,
-      workspaceName: record.workspaceName ?? previous?.workspaceName ?? null,
-      workspaceIds: mergeIds(previous?.workspaceIds, record.workspaceIds)
-    }
+function nonZeroDays(days: Record<string, Amount>): Record<string, Amount> {
+  return Object.fromEntries(
+    Object.entries(days).filter(([, a]) => a.co2Grams > 0 || a.costUsd > 0)
+  )
+}
+
+/** The session that was active last; null with none. */
+export function latestOf(sessions: Priced[]): Priced | null {
+  let latest: Priced | null = null
+  for (const s of sessions) {
+    if (!latest || s.record.lastActiveAt > latest.record.lastActiveAt) latest = s
   }
-}
-
-export function mergeIds(a: string[] = [], b: string[] = []): string[] {
-  return [...new Set([...a, ...b])]
-}
-
-/** A session as the workspace picker lists it. */
-export type FocusSession = SessionRecord & { label: string }
-
-export type Focus = {
-  /** The id `workspace.readContext` gives; null when Orca gives none. */
-  workspaceId: string | null
-  name: string
-  /** Most recently active first. */
-  sessions: FocusSession[]
-  /** The session the card shows; null when the workspace has none. */
-  selected: string | null
-}
-
-/** Picked session per workspace id, kept in storage under PICKS_KEY. */
-export type Picks = Record<string, string>
-
-export const PICKS_KEY = 'picks'
-
-function activity(record: SessionRecord): number {
-  return record.lastActiveAt ?? record.updatedAt
-}
-
-function startLabel(at: number): string {
-  const d = new Date(at)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `Started ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-/**
- * The focused workspace's sessions: those stored with one of its ids, and those Orca lists
- * as running in it (`live`, session id to agent title). Labeled by title, else start time.
- * The picked session wins when it is listed; else the most recently active one.
- */
-export function focusOf(
-  history: History,
-  workspace: { ids: string[]; name: string; workspaceId: string | null },
-  live: Record<string, string | null>,
-  picks: Picks
-): Focus {
-  const sessions: FocusSession[] = Object.values(history)
-    .filter(
-      (r) =>
-        r.sessionId in live || (r.workspaceIds ?? []).some((id) => workspace.ids.includes(id))
-    )
-    .sort((a, b) => activity(b) - activity(a))
-    .map((r) => {
-      const title = live[r.sessionId] || r.title
-      const started = r.startedAt ?? null
-      return {
-        ...r,
-        label: title || (started !== null ? startLabel(started) : r.sessionId.slice(0, 8))
-      }
-    })
-  const picked = workspace.workspaceId ? picks[workspace.workspaceId] : undefined
-  const selected = sessions.some((s) => s.sessionId === picked)
-    ? (picked as string)
-    : (sessions[0]?.sessionId ?? null)
-  return { workspaceId: workspace.workspaceId, name: workspace.name, sessions, selected }
+  return latest
 }
 
 /** Days before `today` minus `count - 1`, as YYYY-MM-DD, oldest first. */
@@ -172,36 +192,4 @@ export function lastDays(today: string, count: number): string[] {
     out.push(`${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`)
   }
   return out
-}
-
-export function summarize(history: History, today: string): Summary {
-  const window = lastDays(today, SUMMARY_DAYS)
-  const byDay = new Map<string, DayTotal>(
-    window.map((day) => [day, { day, co2Grams: 0, costUsd: 0, sessions: 0 }])
-  )
-  let latest: SessionRecord | null = null
-  const inWindow = new Set<string>()
-  for (const record of Object.values(history)) {
-    if (!latest || record.updatedAt > latest.updatedAt) latest = record
-    for (const [day, amount] of Object.entries(record.days)) {
-      const total = byDay.get(day)
-      if (!total) continue
-      total.co2Grams += amount.co2Grams
-      total.costUsd += amount.costUsd
-      total.sessions += 1
-      inWindow.add(record.sessionId)
-    }
-  }
-  const days = [...byDay.values()]
-  return {
-    today,
-    latest,
-    todayTotal: byDay.get(today) ?? { day: today, co2Grams: 0, costUsd: 0, sessions: 0 },
-    last30: {
-      co2Grams: days.reduce((sum, d) => sum + d.co2Grams, 0),
-      costUsd: days.reduce((sum, d) => sum + d.costUsd, 0),
-      sessions: inWindow.size
-    },
-    days
-  }
 }
