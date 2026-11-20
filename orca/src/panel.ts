@@ -3,9 +3,10 @@
 // then redraws on what the worker posts. The HTML comes from src/view.ts.
 import type { Period } from './insights.ts'
 import type { BackfillState, CarbonState } from './protocol.ts'
+import { ago } from './format.ts'
 import { esc, pageHtml, STYLES, UPSTREAM } from './view.ts'
 
-const TICK_MS = 15_000
+const TICK_MS = 60_000
 
 let state: CarbonState | null = null
 let period: Period = '30'
@@ -26,10 +27,20 @@ function draw(): void {
     root.innerHTML = '<section><p class="muted">Loading…</p></section>'
     return
   }
-  // Keep the picker's focus across a redraw, so a keyboard user does not lose their place.
-  const focused = (document.activeElement as HTMLElement | null)?.dataset?.action
+  // Keep the focused control across a redraw, so a keyboard user does not lose their place.
+  const active = (document.activeElement as HTMLElement | null)?.dataset
+  const selector = active?.period
+    ? `[data-period="${active.period}"]`
+    : active?.action
+      ? `[data-action="${active.action}"]`
+      : null
   root.innerHTML = pageHtml(state, { period, now: Date.now(), locale: orca.locale })
-  if (focused) root.querySelector<HTMLElement>(`[data-action="${focused}"]`)?.focus()
+  if (selector) root.querySelector<HTMLElement>(selector)?.focus()
+}
+
+function fail(e: unknown): void {
+  error = String(e)
+  draw()
 }
 
 function show(next: CarbonState): void {
@@ -46,9 +57,12 @@ root.addEventListener('click', (event) => {
     period = (target.dataset.period as Period) ?? '30'
     draw()
   } else if (action === 'reimport') {
-    void orca.plugin.request('carbon.reimport').then(({ started }) => {
-      if (started && state) show({ ...state, backfill: { ...state.backfill, running: true } })
-    })
+    void orca.plugin
+      .request('carbon.reimport')
+      .then(({ started }) => {
+        if (started && state) show({ ...state, backfill: { ...state.backfill, running: true } })
+      })
+      .catch(fail)
   } else if (action === 'upstream') {
     event.preventDefault()
     void orca.shell?.openExternal(UPSTREAM).catch(() => undefined)
@@ -62,22 +76,23 @@ root.addEventListener('change', (event) => {
   void orca.plugin
     .request('carbon.pick', { workspaceId, sessionId: target.value })
     .then(show)
+    .catch(fail)
 })
 
 orca.plugin.on('carbon.changed', show)
 orca.plugin.on('carbon.progress', (backfill: BackfillState) => {
   if (state) show({ ...state, backfill })
 })
-// "Updated ... ago" moves; skip a tick while the picker is open so it does not close under the person.
+// "Updated ... ago" moves: rewrite those texts only, so hovers, focus and the picker stay.
 setInterval(() => {
-  if (!(document.activeElement instanceof HTMLSelectElement)) draw()
+  const now = Date.now()
+  for (const el of root.querySelectorAll<HTMLElement>('[data-ago]')) {
+    el.textContent = `${el.dataset.prefix ?? ''}${ago(Number(el.dataset.ago), now)}`
+  }
 }, TICK_MS)
 
 draw()
 orca.plugin
   .request('carbon.summary')
   .then(show)
-  .catch((e: unknown) => {
-    error = String(e)
-    draw()
-  })
+  .catch(fail)

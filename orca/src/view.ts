@@ -2,10 +2,11 @@
 // history below. Pure (no DOM), so Node tests it; src/panel.ts puts it on the page. Every
 // text from a transcript or from Orca goes through esc().
 import type { CarEquivalence } from './carbon/equiv.ts'
+import { ratioText } from './carbon/median.ts'
 import { ago, CO2_UNITS, co2Parts, formatCo2, formatCount, formatUsd, NBSP } from './format.ts'
-import type { FocusSession } from './history.ts'
-import { PERIODS, type DayBar, type Period, type PeriodView, type Slice } from './insights.ts'
+import { PERIODS, type Bar, type Period, type PeriodView, type Slice } from './insights.ts'
 import type { BackfillState, CarbonState, EquivalenceSet } from './protocol.ts'
+import type { SessionView } from './workspaces.ts'
 
 export type ViewOptions = { period: Period; now: number; locale: string }
 
@@ -49,7 +50,23 @@ function co2Html(grams: number, numberClass: string): string {
   return `<span class="amount"><span class="${numberClass}">${esc(value)}</span>${NBSP}<span class="unit">${esc(unit)}</span></span>`
 }
 
-function tokensTable(s: FocusSession): string {
+function startLabel(at: number): string {
+  const d = new Date(at)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `Started ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** A session's name: its agent's title, else when it started, else its id's start. */
+export function sessionLabel(s: SessionView): string {
+  return s.title || (s.startedAt !== null ? startLabel(s.startedAt) : s.sessionId.slice(0, 8))
+}
+
+/** A time the panel redraws as "N min ago" on its own (src/panel.ts). */
+function agoHtml(prefix: string, at: number, now: number): string {
+  return `<span data-ago="${at}" data-prefix="${esc(prefix)}">${esc(prefix + ago(at, now))}</span>`
+}
+
+function tokensTable(s: SessionView): string {
   const rows: [string, number][] = [
     ['Input', s.tokens.input],
     ['Cache read', s.tokens.cacheRead],
@@ -67,7 +84,7 @@ function picker(state: CarbonState): string {
   const options = focus.sessions
     .map(
       (s) =>
-        `<option value="${esc(s.sessionId)}"${s.sessionId === focus.selected ? ' selected' : ''}>${esc(s.label)} · ${esc(formatCo2(s.co2Grams))}</option>`
+        `<option value="${esc(s.sessionId)}"${s.sessionId === focus.selected ? ' selected' : ''}>${esc(sessionLabel(s))} · ${esc(formatCo2(s.co2Grams))}</option>`
     )
     .join('')
   return `<label class="picker"><span>Session</span><select data-action="pick" aria-label="Session">${options}</select></label>`
@@ -84,16 +101,15 @@ export function currentHtml(state: CarbonState, opts: ViewOptions): string {
   if (!session) {
     return `<section class="current">${head(focus.name)}<p class="empty">No Claude Code session in this workspace.</p></section>`
   }
-  const median = state.insights.sessionMedian
+  const median = focus.median
   const car = carFor(state.cars, state.envSet, opts.locale)
-  const ratio = median > 0 ? session.co2Grams / median : null
-  // One neutral line; a dot in the accent colour only when the session is above the median.
+  // One neutral line, as claude-carbon words it; a dot in the accent colour only above the median.
   const versus =
-    ratio === null
+    median === null || !(session.co2Grams > 0)
       ? ''
-      : `<p class="versus">${ratio > 1 ? '<span class="dot" aria-hidden="true"></span>' : ''}${ratio.toFixed(1)}× your median session (${esc(formatCo2(median))})</p>`
+      : `<p class="versus">${session.co2Grams > median ? '<span class="dot" aria-hidden="true"></span>' : ''}${ratioText(session.co2Grams, median)}×${NBSP}your median (${esc(formatCo2(median))})</p>`
+  const label = sessionLabel(session)
   const models = session.models
-    .filter((m) => !m.excluded)
     .map(
       (m) =>
         `<li><span>${esc(m.model)}</span><span>${esc(formatCo2(m.co2Grams))} · ${esc(formatUsd(m.costUsd))}</span></li>`
@@ -109,9 +125,9 @@ export function currentHtml(state: CarbonState, opts: ViewOptions): string {
       ? `<p class="equiv">≈ <strong>${distance(session.co2Grams, car)}${NBSP}${esc(car.label)}</strong> <span class="muted">(${esc(carFactor(car))})</span></p>`
       : '') +
     versus +
-    `<p class="session-title" title="${esc(session.label)}">${esc(session.label)}</p>` +
+    `<p class="session-title" title="${esc(label)}">${esc(label)}</p>` +
     `<div class="split">${tokensTable(session)}<ul class="models">${models}</ul></div>` +
-    `<p class="muted small">Updated ${esc(ago(session.updatedAt, opts.now))}</p>` +
+    `<p class="muted small">${agoHtml('Updated ', session.updatedAt, opts.now)}</p>` +
     `</section>`
   )
 }
@@ -137,7 +153,7 @@ export function yTicks(max: number): { top: number; ticks: { grams: number; labe
  * are HTML beside the drawing so they keep their shape when it stretches. Each day has a
  * full-height hover target whose tooltip gives its date, CO₂ and cost.
  */
-function barsHtml(days: DayBar[], today: string): string {
+function barsHtml(days: Bar[], unit: PeriodView['bar']): string {
   const n = Math.max(1, days.length)
   const width = 300
   const height = 80
@@ -152,9 +168,11 @@ function barsHtml(days: DayBar[], today: string): string {
     .map((d, i) => {
       const h = d.co2Grams > 0 ? Math.max(1.5, height - y(d.co2Grams)) : 0
       const x = i * w
-      const tip = `${d.day}: ${formatCo2(d.co2Grams)} · ${formatUsd(d.costUsd)}`
+      const when = unit === 'week' ? `Week of ${d.day}` : d.day
+      const tip = `${when}: ${formatCo2(d.co2Grams)} · ${formatUsd(d.costUsd)}`
+      // The last bar holds today.
       return (
-        `<g class="day${d.day === today ? ' today' : ''}"><title>${esc(tip)}</title>` +
+        `<g class="day${i === n - 1 ? ' today' : ''}"><title>${esc(tip)}</title>` +
         `<rect class="hit" x="${x.toFixed(2)}" y="0" width="${w.toFixed(2)}" height="${height}"/>` +
         (h > 0
           ? `<rect class="bar" x="${(x + gap / 2).toFixed(2)}" y="${(height - h).toFixed(2)}" width="${Math.max(0.5, w - gap).toFixed(2)}" height="${h.toFixed(2)}"/>`
@@ -196,8 +214,8 @@ function importHtml(b: BackfillState, now: number): string {
       `<div class="track"><div class="fill accent" style="width:${pct.toFixed(1)}%"></div></div></div>`
     )
   }
-  const last = b.finishedAt === null ? 'Never imported' : `Imported ${ago(b.finishedAt, now)}`
-  return `<div class="import"><span class="muted small">${esc(last)}</span><button type="button" data-action="reimport">Re-import history</button></div>`
+  const last = b.finishedAt === null ? esc('Never imported') : agoHtml('Imported ', b.finishedAt, now)
+  return `<div class="import"><span class="muted small">${last}</span><button type="button" data-action="reimport">Re-import history</button></div>`
 }
 
 export function historyHtml(state: CarbonState, opts: ViewOptions): string {
@@ -206,8 +224,6 @@ export function historyHtml(state: CarbonState, opts: ViewOptions): string {
     (p) =>
       `<button type="button" data-action="period" data-period="${p}" class="${p === opts.period ? 'on' : ''}" aria-pressed="${p === opts.period}">${PERIOD_LABELS[p]}</button>`
   ).join('')
-  const first = view.days[0]?.day ?? ''
-  const last = view.days[view.days.length - 1]?.day ?? ''
   return (
     `<section class="history"><header class="section-head"><h2>History</h2><div class="periods" role="group" aria-label="Period">${tabs}</div></header>` +
     `<div class="kpis">` +
@@ -215,9 +231,9 @@ export function historyHtml(state: CarbonState, opts: ViewOptions): string {
     `<div><span class="kpi">${esc(formatUsd(view.costUsd))}</span><span class="muted small">API-equivalent</span></div>` +
     `<div><span class="kpi">${view.sessions}</span><span class="muted small">sessions</span></div>` +
     `</div>` +
-    `<div class="today muted small">Today ${esc(formatCo2(state.todayTotal.co2Grams))} · ${esc(formatUsd(state.todayTotal.costUsd))}</div>` +
-    barsHtml(view.days, state.today) +
-    `<div class="range muted small"><span>${esc(first)}</span><span>${esc(last)}</span></div>` +
+    `<div class="today muted small">Today ${esc(formatCo2(state.insights.today.co2Grams))} · ${esc(formatUsd(state.insights.today.costUsd))}</div>` +
+    barsHtml(view.bars, view.bar) +
+    `<div class="range muted small"><span>${esc(view.from)}</span><span>${esc(view.to)}${view.bar === 'week' ? ' · a bar per week' : ''}</span></div>` +
     slicesHtml('By model', view.byModel, view.co2Grams) +
     slicesHtml('By workspace', view.byWorkspace, view.co2Grams) +
     importHtml(state.backfill, opts.now) +
@@ -229,7 +245,7 @@ export function pageHtml(state: CarbonState, opts: ViewOptions): string {
   return (
     currentHtml(state, opts) +
     historyHtml(state, opts) +
-    `<footer class="muted small">Estimates with the factors and API prices of <a href="${UPSTREAM}" data-action="upstream">claude-carbon</a> (MIT)${state.dataSource ? '' : ', built-in defaults'}. Cost is what the tokens would cost on the API.</footer>`
+    `<footer class="muted small">Estimates with the factors and API prices of <a href="${UPSTREAM}" data-action="upstream">claude-carbon</a> (MIT)${state.dataSource ? '' : ', built-in defaults'}. Cost is what the tokens would cost on the API.${state.live ? '' : ' This Orca does not say which session an agent runs (host API 1.8): sessions show after the next scan, every 15 min.'}</footer>`
   )
 }
 
