@@ -32,96 +32,105 @@ export function defaultDataDirs(): string[] {
 // Session ids are UUIDs; anything with a path separator or a dot could leave the folder.
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
 
-export type TranscriptFile = { path: string; size: number; mtimeMs: number }
+export type TranscriptFile = { path: string; size: number; mtimeMs: number; ino: number }
 
 async function fileInfo(path: string): Promise<TranscriptFile | null> {
   try {
     const s = await stat(path)
-    return s.isFile() ? { path, size: s.size, mtimeMs: s.mtimeMs } : null
+    return s.isFile() ? { path, size: s.size, mtimeMs: s.mtimeMs, ino: s.ino } : null
   } catch {
     return null
   }
 }
 
+async function names(dir: string): Promise<string[]> {
+  try {
+    return await readdir(dir)
+  } catch {
+    return [] // missing or unreadable: nothing there
+  }
+}
+
+async function folders(dir: string): Promise<string[]> {
+  try {
+    return (await readdir(dir, { withFileTypes: true }))
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+  } catch {
+    return []
+  }
+}
+
 /**
- * The transcript of a session, `<project>/<sessionId>.jsonl`, and those of its subagents,
- * `<project>/<sessionId>/subagents/*.jsonl`, in every project folder. Empty when there is
- * none, such as for an agent other than Claude Code.
+ * A session's subagent transcripts, as claude-carbon's cc_collect_subagents finds them:
+ * `<session>/subagents/*.jsonl`, and the agents a workflow started,
+ * `<session>/subagents/workflows/<wf>/agent-*.jsonl` (the workflow's journal.jsonl beside
+ * them carries no usage).
+ */
+async function subagentFiles(sessionDir: string): Promise<TranscriptFile[]> {
+  const dir = join(sessionDir, 'subagents')
+  const paths = (await names(dir)).filter((n) => n.endsWith('.jsonl')).sort().map((n) => join(dir, n))
+  const workflows = join(dir, 'workflows')
+  for (const wf of (await folders(workflows)).sort()) {
+    for (const n of (await names(join(workflows, wf))).sort()) {
+      if (n.startsWith('agent-') && n.endsWith('.jsonl')) paths.push(join(workflows, wf, n))
+    }
+  }
+  const found: TranscriptFile[] = []
+  for (const path of paths) {
+    const info = await fileInfo(path)
+    if (info) found.push(info)
+  }
+  return found
+}
+
+/** The main transcript of a session in one project folder, then its subagents'; empty when none. */
+async function sessionFiles(projectDir: string, sessionId: string): Promise<TranscriptFile[]> {
+  const main = await fileInfo(join(projectDir, `${sessionId}.jsonl`))
+  return main ? [main, ...(await subagentFiles(join(projectDir, sessionId)))] : []
+}
+
+/**
+ * The transcripts of a session, `<project>/<sessionId>.jsonl` and its subagents', in every
+ * project folder. Empty when there is none, such as for an agent other than Claude Code.
  */
 export async function findTranscripts(
   projectsDir: string,
   sessionId: string
 ): Promise<TranscriptFile[]> {
   if (!SESSION_ID.test(sessionId)) return []
-  let projects: string[]
-  try {
-    projects = (await readdir(projectsDir, { withFileTypes: true }))
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-  } catch {
-    return []
-  }
   const found: TranscriptFile[] = []
-  for (const project of projects) {
-    const main = await fileInfo(join(projectsDir, project, `${sessionId}.jsonl`))
-    if (!main) continue
-    found.push(main)
-    const subagents = join(projectsDir, project, sessionId, 'subagents')
-    let names: string[] = []
-    try {
-      names = await readdir(subagents)
-    } catch {
-      // No subagents folder: the session ran none.
-    }
-    for (const name of names.filter((n) => n.endsWith('.jsonl')).sort()) {
-      const info = await fileInfo(join(subagents, name))
-      if (info) found.push(info)
-    }
+  for (const project of await folders(projectsDir)) {
+    found.push(...(await sessionFiles(join(projectsDir, project), sessionId)))
   }
   return found
 }
 
-/** Changes whenever one of the files grows, is rewritten or is added; short, as it is stored. */
-export function stampOf(files: TranscriptFile[]): string {
+/** Changes whenever a file grows, is rewritten or is added, or the parser changes; stored. */
+export function stampOf(files: TranscriptFile[], parser: number): string {
   const size = files.reduce((sum, f) => sum + f.size, 0)
   const mtime = Math.max(0, ...files.map((f) => f.mtimeMs))
-  return `${files.length}:${size}:${Math.round(mtime)}`
+  return `${parser}|${files.length}:${size}:${Math.round(mtime)}`
 }
 
 /**
  * Every session under the projects folder: each `<project>/<id>.jsonl` with its subagents'
- * transcripts. Subagent folders without a main transcript are left out.
+ * transcripts, one listing per folder. A session id in two folders gets both folders' files.
  */
 export async function listAllSessions(
   projectsDir: string
 ): Promise<{ sessionId: string; files: TranscriptFile[] }[]> {
-  let projects: string[]
-  try {
-    projects = (await readdir(projectsDir, { withFileTypes: true }))
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-  } catch {
-    return []
-  }
-  const ids = new Set<string>()
-  for (const project of projects) {
-    let names: string[] = []
-    try {
-      names = await readdir(join(projectsDir, project))
-    } catch {
-      continue
-    }
-    for (const name of names) {
+  const sessions = new Map<string, TranscriptFile[]>()
+  for (const project of await folders(projectsDir)) {
+    const dir = join(projectsDir, project)
+    for (const name of await names(dir)) {
       const id = name.endsWith('.jsonl') ? name.slice(0, -'.jsonl'.length) : ''
-      if (SESSION_ID.test(id)) ids.add(id)
+      if (!SESSION_ID.test(id)) continue
+      const files = await sessionFiles(dir, id)
+      if (files.length > 0) sessions.set(id, [...(sessions.get(id) ?? []), ...files])
     }
   }
-  const sessions = []
-  for (const sessionId of ids) {
-    const files = await findTranscripts(projectsDir, sessionId)
-    if (files.length > 0) sessions.push({ sessionId, files })
-  }
-  return sessions
+  return [...sessions].map(([sessionId, files]) => ({ sessionId, files }))
 }
 
 export type CarbonData = {

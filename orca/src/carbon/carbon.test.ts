@@ -134,3 +134,14 @@ test('prices a session per model and day, counting non-Claude models as zero', (
     ]
   )
 })
+
+test('a tie for the dominant model goes to the first by name, as jq sorts', () => {
+  const text = [
+    assistant('a', 'claude-sonnet-4-6', '2026-11-20T10:00:00', { output_tokens: 1 }),
+    assistant('b', 'claude-haiku-4-5', '2026-11-20T10:00:00', { output_tokens: 1 }),
+    line({ type: 'assistant', message: { usage: { output_tokens: 7 } } })
+  ].join('\n')
+  const rows = parseTranscript(text, '2026-11-20', (ts) => ts.slice(0, 10))
+  const outputs = Object.fromEntries(rows.map((r) => [r.model, r.tokens.output]))
+  assert.deepEqual(outputs, { 'claude-sonnet-4-6': 1, 'claude-haiku-4-5': 8 })
+})
