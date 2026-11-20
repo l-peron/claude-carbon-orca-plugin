@@ -1,0 +1,71 @@
+{
+  "manifestVersion": 2,
+  "id": "claude-carbon",
+  "name": "Claude Carbon",
+  "version": "0.1.0",
+  "description": "CO2 and API-equivalent cost of the Claude Code sessions you run in Orca, estimated with claude-carbon's factors.",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "carbon",
+        "title": "Claude Carbon",
+        "icon": "cloud",
+        "entry": "src/panel.ts",
+        "ui": "html"
+      }
+    ],
+    "events": [
+      {
+        "on": "agent.status.changed"
+      },
+      {
+        "on": "workspace.changed"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "carbon",
+        "text": "CO₂e",
+        "icon": "cloud",
+        "tooltip": "Claude Carbon: CO₂ of your Claude Code sessions"
+      }
+    ],
+    "settings": [
+      {
+        "key": "projectsDir",
+        "title": "Claude Code transcripts folder",
+        "description": "Where Claude Code writes session transcripts. Empty: $CLAUDE_CONFIG_DIR/projects, else ~/.claude/projects.",
+        "type": "string",
+        "default": "",
+        "placeholder": "~/.claude/projects"
+      },
+      {
+        "key": "dataDir",
+        "title": "Factors folder",
+        "description": "Folder with claude-carbon's factors.json and prices.json, such as a claude-carbon checkout's data/. Empty: the repository's data/ (../data from this folder), else a data/ folder beside the plugin.",
+        "type": "string",
+        "default": ""
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "settings:own"
+    }
+  ]
+}

@@ -10,6 +10,41 @@ claude-carbon is an open source Claude Code plugin that tracks the carbon footpr
 
 <p align="center"><img src="https://github.com/user-attachments/assets/f52b2653-28b9-4efc-82a6-02dfe256e193" width="480" alt="claude-carbon in 16 seconds: Claude Code never shows its CO2; claude-carbon puts it in the terminal status line, then in the Claude desktop app, where /carbon-panel opens a pane with a pixel molecule coloured by this session's CO2 against the median of your past sessions"></p>
 
+## Orca plugin
+
+> This fork adds a community port of claude-carbon to [Orca](https://github.com/stablyai/orca), in [`orca/`](orca/). It is not part of upstream claude-carbon. Everything else in this repository is [gwittebolle/claude-carbon](https://github.com/gwittebolle/claude-carbon), unchanged, under its MIT license.
+
+The Orca plugin shows the CO₂ and API-equivalent cost of the Claude Code sessions you run in Orca, in a sidebar panel and in the status bar. It uses claude-carbon's factors, prices and formulas, read from this repository's `data/`.
+
+<p>
+  <img src="orca/docs/current-session.png" width="300" alt="The Current session card of the Orca plugin: 196 gCO₂e and $6.55 API-equivalent for one session, its car-distance equivalent, how it compares with the median session, and its tokens">
+  <img src="orca/docs/history.png" width="300" alt="The History card of the Orca plugin over 30 days: total CO₂, cost and sessions, a bar per day on a kgCO₂e axis, and the split by model and by workspace">
+</p>
+
+- **Current session**, for the workspace in focus: CO₂, cost, a car-distance equivalent, a comparison with your median session, tokens, CO₂ per model, and a picker when the workspace has several sessions.
+- **History**, over 7 days, 30 days, 90 days or all time: totals, a bar per day, and the split by model and by workspace. On its first run the plugin imports the transcripts already in `~/.claude/projects`.
+- **Status bar**: the latest session and today's total.
+
+Install it (Orca 1.4.248 or newer, plugins turned on):
+
+```sh
+git clone https://github.com/l-peron/claude-carbon-orca-plugin.git
+orca plugin dev load <path>/claude-carbon-orca-plugin/orca --json
+# Orca prints the access the plugin asks for and a fingerprint; if you agree:
+orca plugin dev load <path>/claude-carbon-orca-plugin/orca --json --approve <fingerprint>
+orca plugin open local.claude-carbon --panel carbon
+```
+
+It asks for its own Node.js process (to read `~/.claude/projects` and `data/`), `agent:read`, `workspace:read`, and its own storage and settings.
+
+Limits:
+
+- It counts only Claude Code sessions.
+- It follows the focused workspace, not the focused tab, because Orca's plugin API does not give the tab.
+- It records a session when a turn ends.
+
+The screenshots use made-up sessions. For details, see [orca/README.md](orca/README.md).
+
 ## What claude-carbon does
 
 - `/carbon-panel`: a pane in the Claude desktop app with your CO2 molecule, your usage and the warming stripes of your sessions (in a terminal, the session in the band above the prompt). See [the mod](#the-mod-carbon-panel-and-the-co2-of-each-answer)
