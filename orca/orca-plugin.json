@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "description": "CO2 and API-equivalent cost of the Claude Code sessions you run in Orca, estimated with claude-carbon's factors.",
   "engines": {
-    "orca": ">=1.4.248"
+    "orca": ">=1.4.259"
   },
   "execution": "trusted-worker",
   "pluginApi": 1,

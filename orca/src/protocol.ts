@@ -1,11 +1,11 @@
 // The panel <-> worker contract, declared once: src/panel.ts and src/worker.ts both read it.
 import type { CarEquivalence } from './carbon/equiv.ts'
-import type { Focus, Summary } from './history.ts'
 import type { Insights } from './insights.ts'
+import type { Focus } from './workspaces.ts'
 
 export type EquivalenceSet = 'fr' | 'us' | 'world'
 
-/** The import of every transcript already on disk. */
+/** The import of every transcript on disk. */
 export type BackfillState = {
   running: boolean
   /** Sessions looked at so far, of `total`. */
@@ -17,7 +17,9 @@ export type BackfillState = {
   finishedAt: number | null
 }
 
-export type CarbonState = Summary & {
+export type CarbonState = {
+  /** The worker's local day, YYYY-MM-DD. */
+  today: string
   /** The folder factors.json and prices.json came from; null for the built-in defaults. */
   dataSource: string | null
   /** The workspace Orca has in focus and its Claude Code sessions; null when none is focused. */
@@ -28,6 +30,8 @@ export type CarbonState = Summary & {
   /** The set the worker's locale names (LC_ALL, LC_MESSAGES, LANG); null when none does. */
   envSet: EquivalenceSet | null
   backfill: BackfillState
+  /** False when this Orca does not tell which session an agent runs (host API before 1.8). */
+  live: boolean
 }
 
 declare module 'orca' {
